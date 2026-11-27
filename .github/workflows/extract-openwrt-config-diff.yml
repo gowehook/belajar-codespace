@@ -1,0 +1,66 @@
+name: Extract OpenWrt Config Diff
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_branch:
+        description: "Branch OpenWrt untuk baseline default (contoh: openwrt-24.10 atau main)"
+        required: true
+        default: "openwrt-24.10"
+      target_config_prefix:
+        description: "Prefix target (contoh: CONFIG_TARGET_armsr=y dan CONFIG_TARGET_armsr_armv8=y)"
+        required: true
+        default: "CONFIG_TARGET_armsr=y\nCONFIG_TARGET_armsr_armv8=y"
+
+jobs:
+  diff-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install build dependencies for defconfig
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk gettext libssl-dev xsltproc wget unzip python3 rsync git
+
+      - name: Checkout official OpenWrt baseline
+        run: |
+          git clone --depth=1 --branch "${{ inputs.openwrt_branch }}" https://git.openwrt.org/openwrt/openwrt.git openwrt-base
+          cd openwrt-base
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate default OpenWrt config
+        run: |
+          cd openwrt-base
+          printf "%b\n" "${{ inputs.target_config_prefix }}" > .config
+          make defconfig
+          grep -E '^(CONFIG_|# CONFIG_)' .config | sort -u > ../default_sorted.txt
+
+      - name: Download ophub openwrt_main config and normalize
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/ophub/amlogic-s9xxx-openwrt/refs/heads/main/config/openwrt_main/config" -o ophub_raw.config
+          grep -E '^(CONFIG_|# CONFIG_)' ophub_raw.config | sort -u > ophub_sorted.txt
+
+      - name: Compute added and removed options
+        run: |
+          mkdir -p diff-output
+          comm -13 default_sorted.txt ophub_sorted.txt > diff-output/added_or_changed_in_ophub.txt
+          comm -23 default_sorted.txt ophub_sorted.txt > diff-output/removed_or_overridden_from_default.txt
+
+          grep -E 'CONFIG_PACKAGE_' diff-output/added_or_changed_in_ophub.txt > diff-output/packages_added_or_changed.txt || true
+          grep -E 'CONFIG_PACKAGE_' diff-output/removed_or_overridden_from_default.txt > diff-output/packages_removed_or_overridden.txt || true
+
+          {
+            echo "=== RINGKASAN SELISIH ==="
+            echo "Total baris unik di ophub (ditambah/diubah vs default): $(wc -l < diff-output/added_or_changed_in_ophub.txt)"
+            echo "Total baris unik di default (tidak ada/berbeda di ophub): $(wc -l < diff-output/removed_or_overridden_from_default.txt)"
+            echo "Paket (CONFIG_PACKAGE_) ditambah/diubah: $(wc -l < diff-output/packages_added_or_changed.txt)"
+            echo "Paket (CONFIG_PACKAGE_) dihilangkan/berbeda: $(wc -l < diff-output/packages_removed_or_overridden.txt)"
+          } > diff-output/summary.txt
+
+          cat diff-output/summary.txt
+
+      - name: Upload diff artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-config-diff
+          path: diff-output/
